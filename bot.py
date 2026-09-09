@@ -174,6 +174,22 @@ def api_call(token: str, method: str, params: dict, timeout: int = 40):
     return body.get("result")
 
 
+BOT_COMMANDS = [
+    ("add", "구간 등록: /add 출발역 도착역 날짜 시작 종료"),
+    ("list", "등록된 구간 보기"),
+    ("cancel", "구간 취소: /cancel 번호 (전부는 all)"),
+    ("status", "워커 상태 보기"),
+    ("help", "도움말"),
+]
+
+
+def register_commands(token: str) -> None:
+    """채팅창의 메뉴 버튼과 / 자동완성에 명령 목록을 띄운다. 실패해도 봇은 그냥 돈다."""
+    commands = [{"command": name, "description": desc} for name, desc in BOT_COMMANDS]
+    if api_call(token, "setMyCommands", {"commands": json.dumps(commands, ensure_ascii=False)}, timeout=15):
+        logger.info("텔레그램 명령 메뉴를 등록했습니다.")
+
+
 def drain_pending(token: str) -> int:
     """재시작 전에 쌓인 명령이 한꺼번에 실행되지 않도록 offset 을 최신으로 맞춘다."""
     result = api_call(token, "getUpdates", {"offset": -1, "timeout": 0}, timeout=15)
@@ -262,7 +278,10 @@ def handle_command(text: str, store: JobStore, state: "WorkerState") -> str:
 
     if command == "/cancel":
         if not args:
-            return "취소할 번호를 붙여주세요. 예: /cancel 1 (전부 취소는 /cancel all)"
+            # 메뉴 버튼으로 /cancel 만 눌렀을 때 번호를 바로 고를 수 있게 목록을 같이 보여준다.
+            active = store.active()
+            hint = "취소할 번호를 붙여주세요. 예: /cancel 1 (전부 취소는 /cancel all)"
+            return hint + ("\n\n" + format_list(active) if active else "\n\n감시 중인 구간이 없습니다.")
         if args[0].lower() == "all":
             targets = store.active()
             for job in targets:
@@ -450,6 +469,7 @@ def main() -> None:
     worker = threading.Thread(target=worker_loop, args=(macro, store, state, stop), daemon=True)
     worker.start()
 
+    register_commands(token)
     offset = drain_pending(token)
     send_telegram("🚄 KTX 매크로 봇이 시작됐습니다.\n" + HELP)
     logger.info("봇 대기 중. 텔레그램에서 명령을 보내세요.")
