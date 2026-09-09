@@ -10,7 +10,8 @@
 - 지정석이 나올 때까지 반복 조회 (기본 간격 8초, `--max-attempts 0`이면 무제한)
 - 일반실 우선, 없으면 특실
 - 인원 지정 가능: 어른/청소년/어린이/경로/유아, 총 1~9명 (기본 어른 1명)
-- 두 가지 실행 방법: 명령어(`ktx_macro.py`) 또는 Streamlit 화면(`app.py`). 화면에서는 왕복(가는 편/오는 편)을 한 세션에서 함께 조회·예약
+- 예약되면 비프음 + **텔레그램 알림**(설정했을 때). 서버에서 무인 실행할 때 필요
+- 세 가지 실행 방법: 명령어(`ktx_macro.py`), **텔레그램 봇(`bot.py`)**, Streamlit 화면(`app.py`). 화면에서는 왕복(가는 편/오는 편)을 한 세션에서 함께 조회·예약
 
 구버전 `korail2`는 코레일이 `MACRO ERROR`로 로그인을 막습니다. 지금은 코레일톡 앱 API를 쓰는 [`korail-mobile-api`](https://github.com/yakisoba0728/korail-mobile-api)를 사용합니다.
 
@@ -53,6 +54,166 @@ KORAIL_PW=비밀번호
 - `.env`는 `.gitignore`에 들어 있어 git에 올라가지 않습니다. `git add -f .env`처럼 강제로 추가하지만 않으면 됩니다.
 - Streamlit 화면은 내 PC(`localhost`)에서만 열립니다. `--server.address 0.0.0.0` 같은 옵션으로 외부에 공개하면 같은 네트워크의 다른 기기가 입력칸의 비밀번호를 볼 수 있으니 쓰지 마세요.
 - 직접 확인하고 싶으면 [`korail-mobile-api` 소스](https://github.com/yakisoba0728/korail-mobile-api)에서 접속 주소를 검색해 보세요. `letskorail.com` 외의 주소는 없습니다.
+
+## 알림 (텔레그램)
+
+예약이 잡히면 **구입기한(보통 10~20분) 안에 직접 결제**해야 합니다. 서버나 백그라운드에서 무인으로 돌린다면 비프음은 들리지 않으므로 텔레그램 알림을 설정하세요. 설정하지 않으면 기존처럼 비프음만 나고, 알림 관련 코드는 조용히 건너뜁니다.
+
+### 설정
+
+1. 텔레그램에서 [@BotFather](https://t.me/BotFather)에게 `/newbot` 을 보내고 안내대로 이름을 정하면 **봇 토큰**(`123456789:AAE...`)을 줍니다.
+2. 방금 만든 봇과의 대화방을 열어 아무 메시지나 한 번 보냅니다. (봇은 먼저 말을 건 사람에게만 메시지를 보낼 수 있습니다)
+3. 브라우저에서 `https://api.telegram.org/bot<봇토큰>/getUpdates` 를 열어 `"chat":{"id":123456789` 부분의 숫자를 확인합니다. 이게 **chat_id** 입니다.
+4. `.env` 에 두 줄을 추가합니다.
+
+```
+KORAIL_ID=01012345678
+KORAIL_PW=비밀번호
+TELEGRAM_BOT_TOKEN=123456789:AAE...
+TELEGRAM_CHAT_ID=123456789
+```
+
+### 확인
+
+```bash
+python ktx_macro.py --notify-test
+```
+
+휴대폰에 테스트 메시지가 오면 끝입니다. 이 옵션은 코레일 로그인을 하지 않으므로 `--date` 같은 인자도 필요 없습니다.
+
+### 언제 알림이 오나
+
+| 상황 | 내용 |
+|------|------|
+| 예약 성공 | 구간, 열차 편명·시각, 인원, **구입기한** |
+| 검색 예외 5회 연속 | 조용히 실패만 반복하는 상태를 알림 (한 번만) |
+| 로그인 실패 | 계정·차단 문제로 시작조차 못 한 경우 |
+| 비정상 종료 | 예외로 죽은 경우 (예외 종류와 메시지) |
+| 예약 없이 종료 | `--max-attempts` 도달 등으로 빈손으로 끝난 경우 |
+
+`Ctrl+C` 로 직접 멈춘 경우에는 알림을 보내지 않습니다.
+
+전송에 실패해도 조회·예약은 계속됩니다(로그에 경고만 남습니다). 봇 토큰은 로그에 찍히지 않습니다.
+
+### 서버에서 상시 실행 (리눅스)
+
+Python 3.11 이상이 필요합니다. 우분투 22.04 이하라면 `sudo add-apt-repository ppa:deadsnakes/ppa` 로 3.11 을 먼저 설치하세요.
+
+```bash
+sudo apt update && sudo apt install -y python3.12-venv git
+git clone https://github.com/comflife/ktx-macro.git
+cd ktx-macro
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+`.env` 를 만들고 계정과 텔레그램 토큰을 넣습니다.
+
+```bash
+nano .env      # KORAIL_ID / KORAIL_PW / TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
+.venv/bin/python ktx_macro.py --notify-test          # 알림 확인
+.venv/bin/python ktx_macro.py --dep 광명 --arr 목포 \
+  --leg 20260923,18:00,23:59 --search-only           # 로그인·조회 확인
+```
+
+두 확인이 모두 통과하면 `systemd` 유닛으로 등록합니다. 죽어도 30초 뒤 자동으로 다시 뜹니다.
+
+```ini
+# /etc/systemd/system/ktx.service
+[Unit]
+Description=KTX macro (광명 -> 목포)
+After=network-online.target
+
+[Service]
+WorkingDirectory=/home/ubuntu/ktx-macro
+ExecStart=/home/ubuntu/ktx-macro/.venv/bin/python ktx_macro.py \
+  --dep 광명 --arr 목포 \
+  --leg 20260923,18:00,23:59 \
+  --leg 20260924,10:00,23:59
+Restart=always
+RestartSec=30
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ktx
+journalctl -u ktx -f          # 로그 실시간 확인
+sudo systemctl stop ktx       # 예약이 끝나면 중지
+```
+
+`WorkingDirectory` 가 `.env` 가 있는 폴더여야 합니다. 조건을 바꿀 때는 유닛 파일을 고치고 `sudo systemctl daemon-reload && sudo systemctl restart ktx` 를 실행하세요.
+
+날짜·시간대가 여러 개면 위처럼 `--leg` 를 반복하면 됩니다. 출발역이 서로 다르면(예: 광명과 용산) 유닛 파일을 하나씩 따로 만들고 `--interval` 을 다르게 주세요. 같은 계정으로 동시에 로그인하므로 세션이 밀릴 수 있습니다.
+
+### 명절 특별수송기간 주의
+
+설·추석 특별수송기간 열차는 코레일이 일반 조회·예약 API 를 막아둡니다. 조회하면 `ERR299929` 와 함께 예매 일정 안내가 돌아옵니다. 이 기간 승차권은 지정된 명절 예매 창구(코레일톡·홈페이지의 명절 예매 화면)에서만 잡을 수 있고, 매크로로는 처리할 수 없습니다.
+
+미결제분이 일괄 취소되면서 잔여석이 일반 예매로 풀린 뒤에야 매크로가 동작합니다. `--search-only` 로 하루 한 번 찔러보고, 열차 목록이 뜨기 시작하면 그때 상시 가동으로 전환하세요.
+
+## 실행 (텔레그램 봇)
+
+서버에 `bot.py` 하나만 띄워두고 **휴대폰 텔레그램에서 구간을 등록·취소·조회**합니다. 포트를 열지 않으므로 웹 UI 처럼 인증이나 HTTPS 를 따로 준비할 필요가 없고, 등록된 chat_id 외의 메시지는 무시합니다.
+
+먼저 [알림 (텔레그램)](#알림-텔레그램) 설정을 끝내야 합니다. `TELEGRAM_BOT_TOKEN` 과 `TELEGRAM_CHAT_ID` 가 있어야 시작합니다.
+
+```bash
+python bot.py                 # 어른 1명, 8초 간격
+python bot.py --adult 2 --child 1 --interval 10
+```
+
+인원과 조회 간격은 **프로세스 전체 공통**입니다. 구간마다 다르게 줄 수는 없습니다.
+
+### 명령
+
+| 명령 | 설명 |
+|------|------|
+| `/add 출발역 도착역 날짜 시작 종료 [도착기한]` | 구간 등록. 예: `/add 광명 목포 20260923 18:00 23:59` |
+| `/list` | 등록된 구간과 상태 (🔍 감시 중 / ✅ 예약 완료 / 🚫 취소) |
+| `/cancel <번호>` | 구간 취소. `/cancel all` 이면 전부 |
+| `/status` | 로그인 계정, 인원, 누적 조회 주기, 마지막 조회 시각, 최근 오류 |
+| `/help` | 도움말 |
+
+쉼표로 구분해도 됩니다: `/add 광명,목포,20260923,18:00,23:59`
+
+### 동작 방식
+
+- 코레일 로그인은 **프로세스당 한 번**. 등록된 구간들을 한 세션에서 번갈아 조회합니다. 구간마다 프로세스를 띄우면 같은 계정으로 중복 로그인해 세션이 밀립니다.
+- 지정석이 나오면 예약하고 **열차·구입기한을 텔레그램으로** 보냅니다. 그 구간은 ✅ 로 바뀌고 더 조회하지 않습니다.
+- 구간 목록은 `jobs.json` 에 저장되어 **재시작해도 유지**됩니다. 이 파일은 `.gitignore` 에 있습니다.
+- 역 이름 오타나 예매 불가 기간처럼 조회가 계속 실패하면 3주기 뒤에 한 번 알려줍니다.
+- 재시작 시 쌓여 있던 옛 명령은 무시합니다.
+
+### 서버에 상주시키기
+
+```ini
+# /etc/systemd/system/ktx-bot.service
+[Unit]
+Description=KTX macro telegram bot
+After=network-online.target
+
+[Service]
+WorkingDirectory=/home/ubuntu/ktx-macro
+ExecStart=/home/ubuntu/ktx-macro/.venv/bin/python bot.py
+Restart=always
+RestartSec=30
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ktx-bot
+journalctl -u ktx-bot -f
+```
+
+이제 예약 조건을 바꿀 때 서버에 접속할 필요가 없습니다. 텔레그램에서 `/add`, `/cancel` 만 보내면 됩니다.
 
 ## 실행 (화면)
 
@@ -153,6 +314,8 @@ python ktx_macro.py --date 20260827 --dep 대전 --arr 서울 --start-time 16000
 | `--interval` | 조회 간격(초) | `8` |
 | `--max-attempts` | 최대 조회 횟수. `0`이면 지정석이 나올 때까지 | `0` |
 | `--search-only` | 예약하지 않고 한 번만 조회 | 꺼짐 |
+| `--notify-test` | 텔레그램 알림만 보내보고 종료 | 꺼짐 |
+| `--leg` | `날짜,시작,종료[,도착기한]` 을 여러 번 지정 (한 로그인 세션에서 번갈아 조회) | 없음 |
 
 조회만 하려면:
 
@@ -162,11 +325,26 @@ python ktx_macro.py --date 20260827 --dep 대전 --arr 서울 --start-time 16000
 
 인원은 `--adult 2 --child 1`처럼 지정합니다. 합계는 1~9명이어야 하며, 조회와 예약 모두 이 인원 기준으로 이루어집니다.
 
+### 여러 날짜·시간대를 한 번에
+
+날짜나 시간대 후보가 여러 개면 `--leg` 를 반복해서 넣습니다. 같은 구간(`--dep`/`--arr`)을 **한 로그인 세션에서 번갈아 조회**하므로, 프로세스를 여러 개 띄워 같은 계정으로 중복 로그인하는 것보다 안전합니다.
+
+```bash
+python ktx_macro.py --dep 광명 --arr 목포 \
+  --leg 20260923,18:00,23:59 \
+  --leg 20260924,10:00,23:59
+```
+
+- `--leg` 를 쓰면 `--date` / `--start-time` / `--end-time` 은 무시됩니다.
+- 네 번째 값으로 도착 기한을 줄 수 있습니다: `--leg 20260923,18:00,23:59,235000`
+- 어느 한쪽이 먼저 잡히면 그 구간은 예약 완료로 두고 남은 구간만 계속 찾습니다. **먼저 잡힌 예약도 구입기한 안에 결제**해야 합니다.
+- 둘 다는 필요 없다면 하나가 잡힌 뒤 `Ctrl+C` 로 멈추세요.
+
 간격을 바꾸려면 `--interval 3`처럼 붙이면 됩니다. 너무 짧게 치면 차단될 수 있습니다.
 
 중지: `Ctrl+C`
 
-예약되면 비프음이 나고, **구입기한 안에 코레일톡/웹에서 결제**해야 합니다. 결제하지 않으면 예약이 풀립니다.
+예약되면 비프음이 나고(텔레그램을 설정했으면 알림도 옵니다), **구입기한 안에 코레일톡/웹에서 결제**해야 합니다. 결제하지 않으면 예약이 풀립니다.
 
 ## 주의
 

@@ -11,10 +11,12 @@ k-skill ktx-booking 은 공개 시간표 조회 전용으로 바뀌어 예약은
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import threading
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -44,6 +46,8 @@ from korail_mobile_api import (
 )
 
 ASSIGNED_SEAT_CODE = "11"
+# 검색 예외가 이만큼 연속되면 텔레그램으로 한 번 알린다.
+ERROR_ALERT_THRESHOLD = 5
 KTX_TRAIN_GROUP = "100"
 MUGUNGHWA_MARKERS = ("무궁화",)
 
@@ -200,7 +204,44 @@ def format_passengers(passengers: KorailPassengerCounts) -> str:
     return f"총 {passengers.total}명 ({', '.join(parts)})"
 
 
-def notify_success() -> None:
+def telegram_config() -> tuple[str, str] | None:
+    """.env 의 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID. 둘 다 있어야 알림을 보낸다."""
+    token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+    if not token or not chat_id:
+        return None
+    return token, chat_id
+
+
+def send_telegram(text: str) -> bool:
+    """텔레그램으로 알림을 보낸다. 설정이 없으면 조용히 건너뛴다.
+
+    서버(리눅스)에서는 비프음이 들리지 않으므로 이 알림이 유일한 통보 수단이다.
+    전송에 실패해도 예약 흐름은 멈추지 않는다.
+    """
+    config = telegram_config()
+    if config is None:
+        return False
+    token, chat_id = config
+    payload = json.dumps(
+        {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response.read()
+    except Exception as exc:
+        # 오류 메시지에 토큰이 섞여 나가지 않도록 가린다.
+        logger.warning("텔레그램 알림 전송 실패: %s", str(exc).replace(token, "***"))
+        return False
+    return True
+
+
+def beep() -> None:
     try:
         import winsound
 
@@ -208,6 +249,26 @@ def notify_success() -> None:
         winsound.Beep(1400, 800)
     except Exception:
         print("\a", end="", flush=True)
+
+
+def notify_success(message: str | None = None) -> None:
+    beep()
+    if message:
+        send_telegram(message)
+
+
+def notify_error(message: str) -> None:
+    """로그인 실패·연속 예외·비정상 종료처럼 사람이 개입해야 하는 상황."""
+    send_telegram(message)
+
+
+def format_deadline(result) -> str | None:
+    """예약 응답에서 구입기한 문자열을 뽑는다. 없으면 None."""
+    deadline_date = getattr(result, "payment_deadline_date", None)
+    deadline_time = getattr(result, "payment_deadline_time", None)
+    if deadline_date and deadline_time:
+        return f"{deadline_date} {format_hhmm(deadline_time)}"
+    return getattr(result, "payment_deadline_message", None) or None
 
 
 @dataclass
@@ -392,6 +453,8 @@ class KTXMacro:
         logger.info("입석/입석+좌석은 무시하고, 일반실·특실 지정석만 예약합니다. 무궁화호는 제외합니다.")
 
         attempt = 0
+        error_streak = 0
+        error_alerted = False
         while True:
             if stop_event is not None and stop_event.is_set():
                 logger.info("중지 요청으로 종료합니다.")
@@ -414,7 +477,17 @@ class KTXMacro:
                     )
                 except Exception as exc:
                     logger.error("%s검색 중 예외: %s", tag, exc)
+                    error_streak += 1
+                    if error_streak >= ERROR_ALERT_THRESHOLD and not error_alerted:
+                        # 조용히 실패만 반복하는 상태를 며칠 뒤에 발견하는 일을 막는다.
+                        error_alerted = True
+                        notify_error(
+                            f"⚠️ KTX 매크로 검색 실패 {error_streak}회 연속\n"
+                            f"{leg.describe()}\n마지막 오류: {exc}"
+                        )
                     continue
+                error_streak = 0
+                error_alerted = False
 
                 if not trains:
                     logger.info("%s조건에 맞는 열차 없음. 대기...", tag)
@@ -445,13 +518,23 @@ class KTXMacro:
                     continue
                 leg.result = result
                 logger.info("%s예약 완료. 코레일톡/홈페이지에서 결제하세요.", tag)
-                deadline_date = getattr(result, "payment_deadline_date", None)
-                deadline_time = getattr(result, "payment_deadline_time", None)
-                if deadline_date and deadline_time:
-                    logger.info("%s구입기한: %s %s", tag, deadline_date, format_hhmm(deadline_time))
-                elif getattr(result, "payment_deadline_message", None):
-                    logger.info("%s구입기한: %s", tag, result.payment_deadline_message)
-                notify_success()
+                deadline = format_deadline(result)
+                if deadline:
+                    logger.info("%s구입기한: %s", tag, deadline)
+                notify_success(
+                    "\n".join(
+                        line
+                        for line in (
+                            "✅ KTX 예약 완료",
+                            f"구간: {leg.name} {leg.describe()}" if multi else f"구간: {leg.describe()}",
+                            f"열차: {format_train(target)}",
+                            f"인원: {format_passengers(self.passengers)}",
+                            f"구입기한: {deadline}" if deadline else None,
+                            "기한 안에 코레일톡/홈페이지에서 결제하세요.",
+                        )
+                        if line
+                    )
+                )
 
             if search_only:
                 return legs
@@ -481,11 +564,52 @@ def load_credentials() -> tuple[str, str]:
     return korail_id, korail_pw
 
 
+def build_legs(args) -> list[Leg]:
+    """--leg 를 쓰면 그대로, 아니면 --date/--start-time/--end-time 으로 한 구간을 만든다."""
+    if not args.leg:
+        datetime.strptime(args.date, "%Y%m%d")
+        parse_time(args.start_time)
+        parse_time(args.end_time)
+        if args.arrive_before:
+            parse_time(args.arrive_before)
+        return [
+            Leg(
+                "편도",
+                args.date,
+                args.dep,
+                args.arr,
+                args.start_time,
+                args.end_time,
+                args.arrive_before,
+            )
+        ]
+
+    legs: list[Leg] = []
+    for raw in args.leg:
+        parts = [part.strip() for part in raw.split(",")]
+        if len(parts) not in (3, 4):
+            raise ValueError(f"--leg 형식이 잘못됐습니다: {raw!r} (날짜,시작,종료[,도착기한])")
+        date_txt, start_txt, end_txt = parts[:3]
+        arrive_before = parts[3] if len(parts) == 4 and parts[3] else None
+        try:
+            datetime.strptime(date_txt, "%Y%m%d")
+        except ValueError:
+            raise ValueError(f"--leg 날짜가 잘못됐습니다: {date_txt!r} (YYYYMMDD)") from None
+        for time_txt in (start_txt, end_txt) + ((arrive_before,) if arrive_before else ()):
+            try:
+                parse_time(time_txt)
+            except ValueError:
+                raise ValueError(f"--leg 시각이 잘못됐습니다: {time_txt!r} (HHMMSS 또는 HH:MM)") from None
+        name = f"{date_txt[4:6]}/{date_txt[6:8]} {start_txt}~"
+        legs.append(Leg(name, date_txt, args.dep, args.arr, start_txt, end_txt, arrive_before))
+    return legs
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="KTX 시간대 자동 예약 매크로 (지정석만)")
-    parser.add_argument("--date", required=True, help="예약 날짜 (YYYYMMDD, 예: 20260827)")
-    parser.add_argument("--dep", required=True, help="출발역 (예: 대전)")
-    parser.add_argument("--arr", required=True, help="도착역 (예: 서울)")
+    parser.add_argument("--date", help="예약 날짜 (YYYYMMDD, 예: 20260827)")
+    parser.add_argument("--dep", help="출발역 (예: 대전)")
+    parser.add_argument("--arr", help="도착역 (예: 서울)")
     parser.add_argument("--start-time", default="080000", help="출발 시작 시각 (HHMMSS 또는 HH:MM)")
     parser.add_argument("--end-time", default="235959", help="출발 종료 시각 (HHMMSS 또는 HH:MM)")
     parser.add_argument(
@@ -510,13 +634,41 @@ def main() -> None:
         action="store_true",
         help="예약하지 않고 한 번만 조회",
     )
+    parser.add_argument(
+        "--leg",
+        action="append",
+        metavar="날짜,시작,종료[,도착기한]",
+        help=(
+            "날짜/시간대를 여러 개 지정 (여러 번 사용 가능). "
+            "예: --leg 20260923,18:00,23:59 --leg 20260924,10:00,23:59. "
+            "--dep/--arr 는 공통으로 쓰이고, --date/--start-time/--end-time 은 무시됩니다"
+        ),
+    )
+    parser.add_argument(
+        "--notify-test",
+        action="store_true",
+        help="텔레그램 알림만 한 번 보내보고 종료 (설정 확인용)",
+    )
     args = parser.parse_args()
 
-    datetime.strptime(args.date, "%Y%m%d")
-    parse_time(args.start_time)
-    parse_time(args.end_time)
-    if args.arrive_before:
-        parse_time(args.arrive_before)
+    if args.notify_test:
+        if telegram_config() is None:
+            parser.error("TELEGRAM_BOT_TOKEN 과 TELEGRAM_CHAT_ID 를 .env 에 설정해주세요.")
+        if send_telegram("🚄 KTX 매크로 텔레그램 알림 테스트입니다."):
+            logger.info("텔레그램 알림을 보냈습니다. 휴대폰을 확인하세요.")
+        else:
+            raise SystemExit("텔레그램 전송에 실패했습니다. 토큰과 chat_id 를 확인하세요.")
+        return
+
+    required = ("dep", "arr") if args.leg else ("date", "dep", "arr")
+    missing = [name for name in required if not getattr(args, name)]
+    if missing:
+        parser.error("다음 인자가 필요합니다: " + ", ".join(f"--{name}" for name in missing))
+
+    try:
+        legs = build_legs(args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     try:
         passengers = KorailPassengerCounts(
@@ -530,19 +682,27 @@ def main() -> None:
         parser.error(f"인원 설정 오류: {exc} (총 1~9명, 음수 불가)")
 
     korail_id, korail_pw = load_credentials()
-    macro = KTXMacro(korail_id, korail_pw, passengers=passengers)
+    route = "\n".join(leg.describe() for leg in legs)
     try:
-        macro.run(
-            date=args.date,
-            dep=args.dep,
-            arr=args.arr,
-            start_time=args.start_time,
-            end_time=args.end_time,
-            arrive_before=args.arrive_before,
+        macro = KTXMacro(korail_id, korail_pw, passengers=passengers)
+    except Exception as exc:
+        notify_error(f"❌ KTX 매크로 로그인 실패\n{route}\n{exc}")
+        raise
+
+    try:
+        macro.run_legs(
+            legs,
             interval=args.interval,
             max_attempts=args.max_attempts,
             search_only=args.search_only,
         )
+    except Exception as exc:
+        # 서버에서 무인 실행 중 죽으면 알림 없이는 알 방법이 없다.
+        notify_error(f"❌ KTX 매크로 비정상 종료\n{route}\n{type(exc).__name__}: {exc}")
+        raise
+    else:
+        if not args.search_only and not any(leg.done for leg in legs):
+            notify_error(f"⏹️ KTX 매크로가 예약 없이 종료했습니다.\n{route}")
     finally:
         macro.close()
 
