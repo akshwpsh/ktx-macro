@@ -11,8 +11,8 @@ if [ ! -f k8s/ktx/secret.yaml ]; then
   exit 1
 fi
 
-docker build -t "$IMAGE" .
-docker save "$IMAGE" | sudo k3s ctr images import -
+sudo docker build -t "$IMAGE" .
+sudo docker save "$IMAGE" | sudo k3s ctr images import -
 sudo kubectl apply -k k8s/ktx
 sudo kubectl -n apps rollout restart deploy/ktx-bot
 sudo kubectl -n apps rollout status deploy/ktx-bot --timeout=180s
