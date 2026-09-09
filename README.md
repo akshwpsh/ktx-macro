@@ -215,6 +215,22 @@ journalctl -u ktx-bot -f
 
 이제 예약 조건을 바꿀 때 서버에 접속할 필요가 없습니다. 텔레그램에서 `/add`, `/cancel` 만 보내면 됩니다.
 
+### 컨테이너 / k3s 로 올리기
+
+`Dockerfile` 과 `k8s/ktx/` 매니페스트가 있습니다. 레지스트리 없이 노드에서 직접 빌드해 containerd 에 넣는 방식이라, 파드가 뜨는 노드(`deployment.yaml` 의 `nodeSelector`)에서 실행합니다.
+
+```bash
+git clone https://github.com/akshwpsh/ktx-macro.git && cd ktx-macro
+cp k8s/ktx/secret.example.yaml k8s/ktx/secret.yaml
+nano k8s/ktx/secret.yaml        # 계정·봇 토큰·chat_id
+./deploy.sh                     # build → import → apply → 재시작 → 로그
+```
+
+- 등록한 구간은 PVC(`/data/jobs.json`)에 남아 파드를 갈아엎어도 유지됩니다.
+- `strategy: Recreate` 라 옛 파드가 죽은 뒤에 새 파드가 뜹니다. 같은 계정·같은 봇 토큰으로 둘이 동시에 돌면 안 되기 때문입니다.
+- 코드를 고친 뒤에는 `git pull && ./deploy.sh` 만 하면 됩니다.
+- 로그: `sudo kubectl -n apps logs -f deploy/ktx-bot`
+
 ## 실행 (화면)
 
 명령어가 어려우면 Streamlit 화면을 쓰세요. `requirements.txt`에 포함되어 있어 별도 설치는 필요 없습니다.

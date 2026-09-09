@@ -1,0 +1,2 @@
+python-dotenv
+korail-mobile-api @ git+https://github.com/yakisoba0728/korail-mobile-api

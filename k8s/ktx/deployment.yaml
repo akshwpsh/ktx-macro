@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ktx-bot
+  namespace: apps
+  labels:
+    app: ktx-bot
+spec:
+  replicas: 1
+  # 코레일 계정 하나로 두 프로세스가 로그인하면 세션이 서로 밀리고,
+  # 같은 봇 토큰으로 둘이 getUpdates 를 하면 명령이 한쪽에만 간다.
+  # 그러니 옛 파드가 완전히 죽은 뒤에만 새 파드를 띄운다.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ktx-bot
+  template:
+    metadata:
+      labels:
+        app: ktx-bot
+    spec:
+      # 이미지를 레지스트리 없이 gusal-cloud 의 containerd 에 직접 넣으므로 그 노드에 고정한다.
+      nodeSelector:
+        kubernetes.io/hostname: gusal-cloud
+      # 텔레그램 long-poll 이 최대 30초라 SIGTERM 뒤 정리에 그만큼 여유를 준다.
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: ktx-bot
+          image: ktx-bot:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: ktx-env
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ktx-bot-data

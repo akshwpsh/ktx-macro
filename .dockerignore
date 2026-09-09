@@ -1,0 +1,11 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.env
+jobs.json
+jobs.tmp
+k8s
+README.md
+app.py

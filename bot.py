@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import threading
 import time
 import urllib.parse
@@ -37,7 +39,8 @@ from ktx_macro import (
 )
 from korail_mobile_api import KorailPassengerCounts
 
-JOBS_FILE = Path(__file__).with_name("jobs.json")
+# 컨테이너에서는 KTX_JOBS_FILE 로 볼륨 안 경로를 준다. 없으면 스크립트 옆에 둔다.
+JOBS_FILE = Path(os.getenv("KTX_JOBS_FILE") or Path(__file__).with_name("jobs.json"))
 DEFAULT_INTERVAL = 8
 # 등록 직후 오타(잘못된 역 이름 등)를 알려주되, 일시적 네트워크 오류로는 떠들지 않는다.
 JOB_ERROR_THRESHOLD = 3
@@ -450,6 +453,12 @@ def main() -> None:
     offset = drain_pending(token)
     send_telegram("🚄 KTX 매크로 봇이 시작됐습니다.\n" + HELP)
     logger.info("봇 대기 중. 텔레그램에서 명령을 보내세요.")
+
+    # systemd 와 쿠버네티스는 SIGTERM 으로 끈다. Ctrl+C 와 같은 경로로 정리하게 한다.
+    def _on_sigterm(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
 
     try:
         while True:

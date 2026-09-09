@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ktx-bot-data
+  namespace: apps
+spec:
+  # 등록한 구간 목록(jobs.json) 하나뿐이라 아주 작다.
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 100Mi
